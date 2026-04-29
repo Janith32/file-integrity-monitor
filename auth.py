@@ -118,5 +118,86 @@ def init_default_admin():
             print("Default admin created. Username: admin, Password: admin123")
             print("CHANGE THIS PASSWORD AFTER FIRST LOGIN!")
 
+def init_config_tables():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS monitored_paths (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        path TEXT UNIQUE NOT NULL,
+        enabled INTEGER DEFAULT 1,
+        added_by TEXT,
+        added_at TEXT
+    )''')
+    c.execute('''CREATE TABLE IF NOT EXISTS severity_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_name TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        enabled INTEGER DEFAULT 1
+    )''')
+    conn.commit()
+    conn.close()
+
+def add_monitored_path(path, username):
+    init_config_tables()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        c.execute("INSERT INTO monitored_paths (path, added_by, added_at) VALUES (?, ?, ?)",
+                  (path, username, timestamp))
+        conn.commit()
+        log_audit(username, "PATH_ADDED", f"Path: {path}", success=1)
+        return True, "Path added"
+    except sqlite3.IntegrityError:
+        return False, "Path already exists"
+    finally:
+        conn.close()
+
+def remove_monitored_path(path, username):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM monitored_paths WHERE path = ?", (path,))
+    conn.commit()
+    conn.close()
+    log_audit(username, "PATH_REMOVED", f"Path: {path}", success=1)
+
+def get_monitored_paths():
+    init_config_tables()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, path, enabled, added_by, added_at FROM monitored_paths")
+    paths = c.fetchall()
+    conn.close()
+    return paths
+
+def add_severity_rule(rule_name, pattern, severity, username):
+    init_config_tables()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("INSERT INTO severity_rules (rule_name, pattern, severity) VALUES (?, ?, ?)",
+              (rule_name, pattern, severity))
+    conn.commit()
+    conn.close()
+    log_audit(username, "RULE_ADDED", f"{rule_name}: {pattern} -> {severity}", success=1)
+
+def remove_severity_rule(rule_id, username):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("DELETE FROM severity_rules WHERE id = ?", (rule_id,))
+    conn.commit()
+    conn.close()
+    log_audit(username, "RULE_REMOVED", f"Rule ID: {rule_id}", success=1)
+
+def get_severity_rules():
+    init_config_tables()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, rule_name, pattern, severity, enabled FROM severity_rules")
+    rules = c.fetchall()
+    conn.close()
+    return rules
+            
+
 if __name__ == "__main__":
     init_default_admin()

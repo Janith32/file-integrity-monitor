@@ -2,16 +2,18 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 import time
-from auth import authenticate, init_default_admin, get_all_users, create_user, delete_user, log_audit, hash_password
+from auth import (authenticate, init_default_admin, get_all_users, create_user,
+                  delete_user, log_audit, hash_password, add_monitored_path,
+                  remove_monitored_path, get_monitored_paths, add_severity_rule,
+                  remove_severity_rule, get_severity_rules, init_config_tables)
 
 DB_PATH = "fim.db"
 
 st.set_page_config(page_title="FIM Dashboard", layout="wide", initial_sidebar_state="expanded")
 
-# Initialize database
 init_default_admin()
+init_config_tables()
 
-# Session state for login
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
     st.session_state.username = None
@@ -20,7 +22,6 @@ if 'force_password_change' not in st.session_state:
     st.session_state.force_password_change = False
 
 
-# === LOGIN SCREEN ===
 def show_login():
     st.title("🛡️ FIM Dashboard - Login")
     st.caption("Real-Time File Integrity and Security Monitoring")
@@ -48,7 +49,6 @@ def show_login():
                     st.warning("Please enter both username and password")
 
 
-# === FORCED PASSWORD CHANGE SCREEN ===
 def show_force_password_change():
     st.title("🔐 Password Change Required")
     st.warning("You are using the default password. You must change it before continuing.")
@@ -67,7 +67,7 @@ def show_force_password_change():
                 conn = sqlite3.connect(DB_PATH)
                 c = conn.cursor()
                 new_hash = hash_password(new_password)
-                c.execute("UPDATE users SET password_hash = ? WHERE username = ?", 
+                c.execute("UPDATE users SET password_hash = ? WHERE username = ?",
                           (new_hash, st.session_state.username))
                 conn.commit()
                 conn.close()
@@ -78,7 +78,6 @@ def show_force_password_change():
                 st.rerun()
 
 
-# === MAIN DASHBOARD ===
 def show_dashboard():
     with st.sidebar:
         st.title("🛡️ FIM System")
@@ -87,7 +86,7 @@ def show_dashboard():
         st.divider()
         
         if st.session_state.role == "admin":
-            page = st.radio("Navigation", ["Dashboard", "Alerts", "User Management", "Audit Log"])
+            page = st.radio("Navigation", ["Dashboard", "Alerts", "Configuration", "User Management", "Audit Log"])
         else:
             page = st.radio("Navigation", ["Dashboard", "Alerts", "Audit Log"])
         
@@ -103,6 +102,8 @@ def show_dashboard():
         show_main_dashboard()
     elif page == "Alerts":
         show_alerts_page()
+    elif page == "Configuration":
+        show_configuration()
     elif page == "User Management":
         show_user_management()
     elif page == "Audit Log":
@@ -197,6 +198,82 @@ def show_alerts_page():
     
     csv = filtered.to_csv(index=False).encode('utf-8')
     st.download_button("Download CSV", csv, "alerts.csv", "text/csv")
+
+
+def show_configuration():
+    if st.session_state.role != "admin":
+        st.error("Access denied. Admin only.")
+        return
+    
+    st.title("⚙️ System Configuration")
+    
+    tab1, tab2 = st.tabs(["Monitored Paths", "Severity Rules"])
+    
+    with tab1:
+        st.subheader("Currently Monitored Paths")
+        paths = get_monitored_paths()
+        if paths:
+            paths_df = pd.DataFrame(paths, columns=['ID', 'Path', 'Enabled', 'Added By', 'Added At'])
+            st.dataframe(paths_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No monitored paths configured.")
+        
+        st.divider()
+        st.subheader("Add Monitored Path")
+        with st.form("add_path_form"):
+            new_path = st.text_input("Folder path (e.g., D:\\FIM_Project123\\Web_Server_Files)")
+            if st.form_submit_button("Add Path"):
+                if new_path:
+                    success, msg = add_monitored_path(new_path, st.session_state.username)
+                    if success:
+                        st.success(msg)
+                        st.warning("Restart monitor.py to apply changes")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+        
+        st.subheader("Remove Path")
+        if paths:
+            path_options = [p[1] for p in paths]
+            path_to_remove = st.selectbox("Select path to remove", path_options)
+            if st.button("Remove Path", type="primary"):
+                remove_monitored_path(path_to_remove, st.session_state.username)
+                st.success("Path removed")
+                time.sleep(1)
+                st.rerun()
+    
+    with tab2:
+        st.subheader("Current Severity Rules")
+        rules = get_severity_rules()
+        if rules:
+            rules_df = pd.DataFrame(rules, columns=['ID', 'Rule Name', 'Pattern', 'Severity', 'Enabled'])
+            st.dataframe(rules_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No severity rules configured.")
+        
+        st.divider()
+        st.subheader("Add Severity Rule")
+        with st.form("add_rule_form"):
+            rule_name = st.text_input("Rule name (e.g., 'Critical config files')")
+            pattern = st.text_input("File pattern (e.g., '.env' or 'config' or '.conf')")
+            severity = st.selectbox("Severity", ["HIGH", "MEDIUM", "LOW"])
+            if st.form_submit_button("Add Rule"):
+                if rule_name and pattern:
+                    add_severity_rule(rule_name, pattern, severity, st.session_state.username)
+                    st.success("Rule added")
+                    time.sleep(1)
+                    st.rerun()
+        
+        st.subheader("Remove Rule")
+        if rules:
+            rule_options = {f"{r[0]}: {r[1]}": r[0] for r in rules}
+            selected = st.selectbox("Select rule to remove", list(rule_options.keys()))
+            if st.button("Remove Rule", type="primary"):
+                remove_severity_rule(rule_options[selected], st.session_state.username)
+                st.success("Rule removed")
+                time.sleep(1)
+                st.rerun()
 
 
 def show_user_management():
