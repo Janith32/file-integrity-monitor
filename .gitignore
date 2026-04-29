@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# FIM project files
+Backup/
+fim.db
+*.log
+__pycache__/
