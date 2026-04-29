@@ -3,32 +3,22 @@ import sqlite3
 import os
 import time
 import shutil
-import smtplib
 from datetime import datetime
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 
 # ===== CONFIGURATION =====
 DB_PATH = "fim.db"
-MONITOR_PATH = r"D:\FIM_Project123\Web_Server_Files"
 BACKUP_PATH = r"D:\FIM_Project123\Backup"
-
-# Email config - REPLACE THESE
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-EMAIL_FROM = "dilshanfernado061@gmail.com"
-EMAIL_PASSWORD = "ciey opcs dbns tszx"  # 16-char app password, no spaces
-EMAIL_TO = "danithfernando63@gmail.com"  # can be same as FROM
-
+RELOAD_INTERVAL = 10  # seconds - how often to check for new paths/rules
 AUTO_RESTORE = True
-EMAIL_ENABLED = True
 
-# Self-trigger prevention
+# Self-trigger prevention for auto-restore
 pending_restores = set()
 
+
+# ===== HASHING =====
 def hash_file(path):
     h = hashlib.sha256()
     with open(path, 'rb') as f:
@@ -36,6 +26,8 @@ def hash_file(path):
             h.update(chunk)
     return h.hexdigest()
 
+
+# ===== DATABASE TABLES =====
 def init_alerts_table():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -53,65 +45,79 @@ def init_alerts_table():
     conn.commit()
     conn.close()
 
-def create_backup(folder):
-    """Create initial backup of all monitored files."""
+
+# ===== READ CONFIG FROM DATABASE =====
+def get_active_paths():
+    """Read enabled monitored paths from the database."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT path FROM monitored_paths WHERE enabled = 1")
+        paths = [row[0] for row in c.fetchall()]
+    except sqlite3.OperationalError:
+        paths = []
+    conn.close()
+    return paths
+
+
+def get_active_rules():
+    """Read enabled severity rules from the database."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        c.execute("SELECT pattern, severity FROM severity_rules WHERE enabled = 1")
+        rules = c.fetchall()
+    except sqlite3.OperationalError:
+        rules = []
+    conn.close()
+    return rules
+
+
+def classify_severity(file_path, default_severity):
+    """Apply user-defined rules to determine severity. Falls back to default if no rule matches."""
+    rules = get_active_rules()
+    for pattern, severity in rules:
+        if pattern.lower() in file_path.lower():
+            return severity
+    return default_severity
+
+
+# ===== BACKUP =====
+def create_backup_for_path(folder):
+    """Create backup snapshot of all files in a monitored folder."""
     Path(BACKUP_PATH).mkdir(parents=True, exist_ok=True)
     count = 0
     for root, dirs, files in os.walk(folder):
         for filename in files:
             src = os.path.join(root, filename)
-            rel = os.path.relpath(src, folder)
-            dst = os.path.join(BACKUP_PATH, rel)
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-            count += 1
-    print(f"Backup created: {count} files in {BACKUP_PATH}")
+            try:
+                rel = os.path.relpath(src, folder)
+                folder_name = os.path.basename(folder.rstrip("\\/"))
+                dst = os.path.join(BACKUP_PATH, folder_name, rel)
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                count += 1
+            except Exception as e:
+                print(f"Backup error for {src}: {e}")
+    print(f"  Backed up {count} files from {folder}")
 
-def restore_file(path):
+
+def restore_file(path, monitor_folder):
     """Restore a file from backup."""
-    rel = os.path.relpath(path, MONITOR_PATH)
-    backup_file = os.path.join(BACKUP_PATH, rel)
+    folder_name = os.path.basename(monitor_folder.rstrip("\\/"))
+    rel = os.path.relpath(path, monitor_folder)
+    backup_file = os.path.join(BACKUP_PATH, folder_name, rel)
     if os.path.exists(backup_file):
         pending_restores.add(path)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         shutil.copy2(backup_file, path)
         print(f"  -> RESTORED from backup")
         return True
-    else:
-        print(f"  -> No backup available for restore")
-        return False
+    print(f"  -> No backup available for {path}")
+    return False
 
-def send_email_alert(event_type, file_path, severity, mitre):
-    if not EMAIL_ENABLED:
-        return
-    try:
-        msg = MIMEMultipart()
-        msg['From'] = EMAIL_FROM
-        msg['To'] = EMAIL_TO
-        msg['Subject'] = f"[FIM ALERT - {severity}] {event_type}: {os.path.basename(file_path)}"
-        body = f"""
-File Integrity Monitor Alert
-============================
 
-Event Type: {event_type}
-Severity: {severity}
-File Path: {file_path}
-MITRE ATT&CK: {mitre}
-Timestamp: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-
-This is an automated alert from your FIM system.
-Dashboard: http://localhost:8501
-"""
-        msg.attach(MIMEText(body, 'plain'))
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
-        server.starttls()
-        server.login(EMAIL_FROM, EMAIL_PASSWORD)
-        server.send_message(msg)
-        server.quit()
-        print(f"  -> Email sent to {EMAIL_TO}")
-    except Exception as e:
-        print(f"  -> Email failed: {e}")
-
+# ===== ALERT LOGGING =====
 def log_alert(event_type, file_path, old_hash="", new_hash="", mitre="", severity="MEDIUM", action=""):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -122,6 +128,7 @@ def log_alert(event_type, file_path, old_hash="", new_hash="", mitre="", severit
     conn.close()
     print(f"[{timestamp}] [{severity}] {event_type}: {file_path}")
 
+
 def get_baseline(path):
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
@@ -130,47 +137,37 @@ def get_baseline(path):
     conn.close()
     return row
 
-def check_file(path):
-    if path in pending_restores:
-        pending_restores.discard(path)
-        return  # Ignore self-triggered restore events
-    
-    if not os.path.exists(path):
-        action = ""
-        if AUTO_RESTORE and restore_file(path):
-            action = "Auto-restored from backup"
-        log_alert("DELETED", path, mitre="T1070.004", severity="HIGH", action=action)
-        send_email_alert("DELETED", path, "HIGH", "T1070.004")
-        return
-    
-    baseline = get_baseline(path)
-    if baseline is None:
-        log_alert("NEW_FILE", path, mitre="T1105", severity="MEDIUM")
-        send_email_alert("NEW_FILE", path, "MEDIUM", "T1105")
-        return
-    
-    old_hash, old_size, old_mtime = baseline
-    
-    try:
-        stat = os.stat(path)
-        if stat.st_size == old_size and stat.st_mtime == old_mtime:
-            return
-    except Exception:
-        return
-    
-    try:
-        new_hash = hash_file(path)
-        if new_hash != old_hash:
-            action = ""
-            if AUTO_RESTORE and restore_file(path):
-                action = "Auto-restored from backup"
-            log_alert("MODIFIED", path, old_hash=old_hash, new_hash=new_hash, mitre="T1565.001", severity="HIGH", action=action)
-            send_email_alert("MODIFIED", path, "HIGH", "T1565.001")
-    except Exception as e:
-        print(f"Error hashing {path}: {e}")
 
+def add_to_baseline(path):
+    """Add a file to baseline (used when new paths are added)."""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS baseline (
+        path TEXT PRIMARY KEY,
+        hash TEXT, size INTEGER, mtime REAL
+    )''')
+    try:
+        file_hash = hash_file(path)
+        stat = os.stat(path)
+        c.execute("INSERT OR REPLACE INTO baseline VALUES (?, ?, ?, ?)",
+                  (path, file_hash, stat.st_size, stat.st_mtime))
+        conn.commit()
+    except Exception as e:
+        print(f"Baseline error for {path}: {e}")
+    conn.close()
+
+
+def baseline_folder(folder):
+    """Add all files in a folder to baseline."""
+    for root, dirs, files in os.walk(folder):
+        for filename in files:
+            add_to_baseline(os.path.join(root, filename))
+
+
+# ===== EVENT HANDLER =====
 class FIMHandler(FileSystemEventHandler):
-    def __init__(self):
+    def __init__(self, monitor_folder):
+        self.monitor_folder = monitor_folder
         self.last_event = {}
     
     def should_process(self, path):
@@ -180,39 +177,134 @@ class FIMHandler(FileSystemEventHandler):
         self.last_event[path] = now
         return True
     
+    def check_file(self, path):
+        if path in pending_restores:
+            pending_restores.discard(path)
+            return
+        
+        if not os.path.exists(path):
+            severity = classify_severity(path, "HIGH")
+            action = ""
+            if AUTO_RESTORE and restore_file(path, self.monitor_folder):
+                action = "Auto-restored from backup"
+            log_alert("DELETED", path, mitre="T1070.004", severity=severity, action=action)
+            return
+        
+        baseline = get_baseline(path)
+        if baseline is None:
+            severity = classify_severity(path, "MEDIUM")
+            log_alert("NEW_FILE", path, mitre="T1105", severity=severity)
+            add_to_baseline(path)  # auto-add new files to baseline
+            return
+        
+        old_hash, old_size, old_mtime = baseline
+        try:
+            stat = os.stat(path)
+            if stat.st_size == old_size and stat.st_mtime == old_mtime:
+                return
+        except Exception:
+            return
+        
+        try:
+            new_hash = hash_file(path)
+            if new_hash != old_hash:
+                severity = classify_severity(path, "HIGH")
+                action = ""
+                if AUTO_RESTORE and restore_file(path, self.monitor_folder):
+                    action = "Auto-restored from backup"
+                log_alert("MODIFIED", path, old_hash=old_hash, new_hash=new_hash,
+                          mitre="T1565.001", severity=severity, action=action)
+        except Exception as e:
+            print(f"Error hashing {path}: {e}")
+    
     def on_modified(self, event):
         if event.is_directory or not self.should_process(event.src_path):
             return
         time.sleep(0.5)
-        check_file(event.src_path)
+        self.check_file(event.src_path)
     
     def on_created(self, event):
         if event.is_directory or not self.should_process(event.src_path):
             return
-        check_file(event.src_path)
+        self.check_file(event.src_path)
     
     def on_deleted(self, event):
         if event.is_directory or event.src_path in pending_restores:
             return
-        check_file(event.src_path)
+        self.check_file(event.src_path)
 
+
+# ===== DYNAMIC OBSERVER MANAGEMENT =====
+class DynamicMonitor:
+    def __init__(self):
+        self.observers = {}  # path -> Observer instance
+    
+    def start_path(self, path):
+        if path in self.observers:
+            return
+        if not os.path.exists(path):
+            print(f"  ! Path does not exist: {path}")
+            return
+        
+        print(f"  + Starting monitor for: {path}")
+        # Create baseline and backup for new path
+        baseline_folder(path)
+        create_backup_for_path(path)
+        
+        observer = Observer()
+        handler = FIMHandler(path)
+        observer.schedule(handler, path, recursive=True)
+        observer.start()
+        self.observers[path] = observer
+    
+    def stop_path(self, path):
+        if path in self.observers:
+            print(f"  - Stopping monitor for: {path}")
+            self.observers[path].stop()
+            self.observers[path].join()
+            del self.observers[path]
+    
+    def reconcile(self):
+        """Compare desired paths (from DB) with active paths and adjust."""
+        desired = set(get_active_paths())
+        active = set(self.observers.keys())
+        
+        # Start new paths
+        for path in desired - active:
+            self.start_path(path)
+        
+        # Stop removed paths
+        for path in active - desired:
+            self.stop_path(path)
+    
+    def stop_all(self):
+        for path in list(self.observers.keys()):
+            self.stop_path(path)
+
+
+# ===== MAIN =====
 if __name__ == "__main__":
     init_alerts_table()
-    create_backup(MONITOR_PATH)
-    print(f"\nMonitoring: {MONITOR_PATH}")
-    print(f"Backup: {BACKUP_PATH}")
-    print(f"Auto-restore: {AUTO_RESTORE}")
-    print(f"Email alerts: {EMAIL_ENABLED}")
-    print("Press Ctrl+C to stop\n")
     
-    observer = Observer()
-    observer.schedule(FIMHandler(), MONITOR_PATH, recursive=True)
-    observer.start()
+    print("=" * 60)
+    print("FIM System Starting")
+    print("=" * 60)
+    print(f"Database: {DB_PATH}")
+    print(f"Backup folder: {BACKUP_PATH}")
+    print(f"Auto-restore: {AUTO_RESTORE}")
+    print(f"Reload interval: {RELOAD_INTERVAL}s")
+    print(f"Configure paths via the dashboard.")
+    print("=" * 60)
+    
+    monitor = DynamicMonitor()
     
     try:
         while True:
-            time.sleep(1)
+            monitor.reconcile()
+            if not monitor.observers:
+                print("No paths configured. Add paths via the dashboard.")
+            time.sleep(RELOAD_INTERVAL)
     except KeyboardInterrupt:
-        observer.stop()
-        print("\nMonitoring stopped.")
-    observer.join()
+        print("\nStopping all monitors...")
+        monitor.stop_all()
+        print("Done.")
