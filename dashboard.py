@@ -5,7 +5,8 @@ import time
 from auth import (authenticate, init_default_admin, get_all_users, create_user,
                   delete_user, log_audit, hash_password, add_monitored_path,
                   remove_monitored_path, get_monitored_paths, add_severity_rule,
-                  remove_severity_rule, get_severity_rules, init_config_tables)
+                  remove_severity_rule, get_severity_rules, init_config_tables,
+                  verify_chain)
 
 DB_PATH = "fim.db"
 
@@ -86,9 +87,9 @@ def show_dashboard():
         st.divider()
         
         if st.session_state.role == "admin":
-            page = st.radio("Navigation", ["Dashboard", "Alerts", "Configuration", "User Management", "Audit Log"])
+            page = st.radio("Navigation", ["Dashboard", "Alerts", "Configuration", "User Management", "Audit Log" ,"Chain Verify"])
         else:
-            page = st.radio("Navigation", ["Dashboard", "Alerts", "Audit Log"])
+            page = st.radio("Navigation", ["Dashboard", "Alerts", "Audit Log" , "Chain Verify"])
         
         st.divider()
         if st.button("Logout", use_container_width=True):
@@ -108,6 +109,8 @@ def show_dashboard():
         show_user_management()
     elif page == "Audit Log":
         show_audit_log()
+    elif page == "Chain Verify":
+        show_chain_verify()
 
 
 def get_baseline_files():
@@ -340,6 +343,39 @@ def show_audit_log():
     
     csv = df.to_csv(index=False).encode('utf-8')
     st.download_button("Export Audit Log (CSV)", csv, "audit_log.csv", "text/csv")
+
+def show_chain_verify():
+    st.title("🔗 Tamper-Evident Audit Chain")
+    st.caption("Cryptographic verification of alert log integrity")
+    
+    if st.button("Verify Chain Integrity", type="primary"):
+        with st.spinner("Verifying chain..."):
+            valid, message = verify_chain()
+            if valid:
+                st.success(f"✅ {message}")
+            else:
+                st.error(f"❌ TAMPERING DETECTED: {message}")
+    
+    st.divider()
+    st.subheader("Chain Entries")
+    
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        df = pd.read_sql_query("SELECT id, timestamp, alert_data, prev_hash, entry_hash FROM chained_alerts ORDER BY id DESC LIMIT 50", conn)
+    except Exception:
+        df = pd.DataFrame()
+    conn.close()
+    
+    if df.empty:
+        st.info("No chain entries yet. Generate alerts to populate the chain.")
+        return
+    
+    df['prev_hash'] = df['prev_hash'].apply(lambda x: x[:16] + '...' if len(x) > 16 else x)
+    df['entry_hash'] = df['entry_hash'].apply(lambda x: x[:16] + '...' if len(x) > 16 else x)
+    
+    st.dataframe(df, use_container_width=True, hide_index=True)
+    
+    st.info("Each entry's hash includes the previous entry's hash. Tampering with any entry breaks the chain and is detectable.")  
 
 
 # === MAIN ROUTING ===

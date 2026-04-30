@@ -1,4 +1,5 @@
 import sqlite3
+import hashlib
 import bcrypt
 from datetime import datetime
 
@@ -197,6 +198,68 @@ def get_severity_rules():
     rules = c.fetchall()
     conn.close()
     return rules
+
+def init_chained_log_table():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS chained_alerts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        timestamp TEXT NOT NULL,
+        alert_data TEXT NOT NULL,
+        prev_hash TEXT NOT NULL,
+        entry_hash TEXT NOT NULL
+    )''')
+    conn.commit()
+    conn.close()
+
+
+def add_to_chain(alert_data):
+    """Add an entry to the hash-chained log."""
+    init_chained_log_table()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Get the most recent entry hash
+    c.execute("SELECT entry_hash FROM chained_alerts ORDER BY id DESC LIMIT 1")
+    row = c.fetchone()
+    prev_hash = row[0] if row else "GENESIS"
+    
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Compute new entry hash from previous + current data
+    entry_content = f"{prev_hash}|{timestamp}|{alert_data}"
+    entry_hash = hashlib.sha256(entry_content.encode()).hexdigest()
+    
+    c.execute("INSERT INTO chained_alerts (timestamp, alert_data, prev_hash, entry_hash) VALUES (?, ?, ?, ?)",
+              (timestamp, alert_data, prev_hash, entry_hash))
+    conn.commit()
+    conn.close()
+
+
+def verify_chain():
+    """Verify the integrity of the audit chain."""
+    init_chained_log_table()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT id, timestamp, alert_data, prev_hash, entry_hash FROM chained_alerts ORDER BY id")
+    entries = c.fetchall()
+    conn.close()
+    
+    if not entries:
+        return True, "Chain is empty"
+    
+    expected_prev = "GENESIS"
+    for entry_id, ts, data, prev_hash, entry_hash in entries:
+        if prev_hash != expected_prev:
+            return False, f"Chain broken at entry {entry_id}: prev_hash mismatch"
+        
+        recomputed = hashlib.sha256(f"{prev_hash}|{ts}|{data}".encode()).hexdigest()
+        if recomputed != entry_hash:
+            return False, f"Chain broken at entry {entry_id}: entry_hash mismatch (tampering detected)"
+        
+        expected_prev = entry_hash
+    
+    return True, f"Chain verified. {len(entries)} entries intact."
             
 
 if __name__ == "__main__":

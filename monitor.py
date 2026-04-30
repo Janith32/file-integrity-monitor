@@ -1,3 +1,5 @@
+from alerts import send_discord_alert
+from auth import add_to_chain
 import hashlib
 import sqlite3
 import os
@@ -7,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
 
 # ===== CONFIGURATION =====
 DB_PATH = "fim.db"
@@ -127,7 +130,22 @@ def log_alert(event_type, file_path, old_hash="", new_hash="", mitre="", severit
     conn.commit()
     conn.close()
     print(f"[{timestamp}] [{severity}] {event_type}: {file_path}")
-
+    
+    # Add to hash-chained tamper-evident log
+    try:
+        chain_data = f"{event_type}|{file_path}|{severity}|{mitre}"
+        add_to_chain(chain_data)
+    except Exception as e:
+        print(f"  -> Chain log failed: {e}")
+    
+    # Send Discord notification
+    try:
+        if send_discord_alert(event_type, file_path, severity, mitre, action):
+            print(f"  -> Discord alert sent")
+        else:
+            print(f"  -> Discord alert NOT sent (check alerts.py config)")
+    except Exception as e:
+        print(f"  -> Discord alert error: {e}")
 
 def get_baseline(path):
     conn = sqlite3.connect(DB_PATH)
@@ -194,7 +212,17 @@ class FIMHandler(FileSystemEventHandler):
         if baseline is None:
             severity = classify_severity(path, "MEDIUM")
             log_alert("NEW_FILE", path, mitre="T1105", severity=severity)
-            add_to_baseline(path)  # auto-add new files to baseline
+            add_to_baseline(path)
+            # Also create backup of newly seen files
+            try:
+                folder_name = os.path.basename(self.monitor_folder.rstrip("\\/"))
+                rel = os.path.relpath(path, self.monitor_folder)
+                backup_dest = os.path.join(BACKUP_PATH, folder_name, rel)
+                os.makedirs(os.path.dirname(backup_dest), exist_ok=True)
+                shutil.copy2(path, backup_dest)
+                print(f"  -> New file backed up")
+            except Exception as e:
+                print(f"  -> Backup of new file failed: {e}")
             return
         
         old_hash, old_size, old_mtime = baseline

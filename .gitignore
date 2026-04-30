@@ -222,3 +222,5 @@ Backup/
 fim.db
 *.log
 __pycache__/
+Web_Server_Files/
+test_discord.py
